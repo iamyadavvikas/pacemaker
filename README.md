@@ -8,6 +8,97 @@ ramp up the migration job") and that almost nobody ships as a durable, enforced
 control. Existing tools (Atlas, Squawk) statically lint *schema* changes; this
 governs *job throughput at runtime*.
 
+## Problem Statement
+
+**The scenario:** You have a production database (Postgres or MongoDB) serving live
+customer traffic. You need to run a large data migration or backfill job — say,
+backfilling millions of rows.
+
+**What goes wrong:** The migration hammers the DB, exhausts connections, and causes
+lock contention. Customer-facing queries slow to a crawl or time out. You've just
+taken production down with a backfill.
+
+**Why it keeps happening:**
+- Every incident retro recommends "rate-limit the migration job" or "gradually ramp it up"
+- But nobody ships a *durable, enforced* control — it's ad-hoc `sleep()` calls or manual "go/stop" Slack commands
+- Existing tools (Atlas, Squawk) lint *schema changes* statically; nothing governs *job throughput at runtime*
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Production Database                            │
+│  ┌─────────────┐                                      ┌─────────────┐       │
+│  │ Prod Traffic│ ──────────────┐      ┌───────────────│  Migration  │       │
+│  └─────────────┘               │      │               │    Job      │       │
+│                                ▼      ▼               └─────────────┘       │
+│                         ┌─────────────────┐                  ▲              │
+│                         │   PostgreSQL    │                  │              │
+│                         │    / MongoDB    │                  │              │
+│                         └────────┬────────┘                  │              │
+│                                  │                           │              │
+└──────────────────────────────────┼───────────────────────────┼──────────────┘
+                                   │                           │
+                     pg_stat_activity / currentOp              │
+                                   │                           │
+                                   ▼                           │
+┌──────────────────────────────────────────────────────────────┼──────────────┐
+│                         Pacing Governor                      │              │
+│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────┴───────────┐  │
+│  │     Sensor      │───▶│   AIMD Policy   │───▶│    Governor / Agent     │  │
+│  │ (Postgres/Mongo)│    │  (GREEN→RED)    │    │ (block / cancel / log)  │  │
+│  └─────────────────┘    └─────────────────┘    └─────────────────────────┘  │
+│         │                                                    │              │
+│         │ Headroom{level, active, blocked, lag}              │              │
+│         ▼                                                    ▼              │
+│  ┌─────────────────┐                              ┌─────────────────┐       │
+│  │    Dashboard    │                              │    Notifiers    │       │
+│  │  /api/state     │                              │  (Slack, SFx)   │       │
+│  │  /throttle      │                              └─────────────────┘       │
+│  └─────────────────┘                                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Control Loop (TCP Congestion-Style AIMD)
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  1️⃣  SENSE                2️⃣  DECIDE               3️⃣  ACT                  │
+│  ─────────────────────    ─────────────────────    ─────────────────────     │
+│  Poll DB every N sec      What level?              Update concurrency limit  │
+│  Count active backends    ├─ GREEN  → +1 limit     Block waiting workers     │
+│  Check blocked queries    ├─ YELLOW → hold         Or cancel excess backends │
+│  Measure replication lag  ├─ RED    → limit × 0.5  Notify (Slack, etc.)      │
+│  Track latency p99        └─ CRITICAL → pause                                │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Health Levels
+
+| Level | Condition | AIMD Action |
+|-------|-----------|-------------|
+| 🟢 **GREEN** | active < threshold, no blocked, lag < 1s | **Increase** limit +1 |
+| 🟡 **YELLOW** | approaching threshold, or lag 1-5s | **Hold** limit |
+| 🔴 **RED** | over threshold, or blocked > 0, or lag > 5s | **Decrease** limit × 0.5 |
+| ⚫ **CRITICAL** | severe overload | **Pause** (limit → 0) or throttle to min |
+
+### Three Operating Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| **OBSERVE** | Shadow mode — logs what it *would* throttle, never blocks | Zero-risk proof-of-value |
+| **ENFORCE (Library)** | Workers call `gov.batch()`, blocked until headroom | In-process backfill jobs |
+| **ENFORCE (Canceller)** | Out-of-band `pg_cancel_backend()` / `killOp()` | Non-cooperative migrations |
+
+### Workload Attribution
+
+The governor surgically targets only the migration cohort, **never touching prod queries**:
+
+```
+Signal Precedence (strongest → weakest):
+  usename (DB role)  →  query_tag (SQL comment)  →  application_name
+```
+
 ## How it works
 
 A closed feedback loop, modelled on TCP congestion control (AIMD):
