@@ -183,6 +183,32 @@ class Governor:
             self._cv.notify_all()
         return mode
 
+    # --- live tuning (self-service pacing knobs) ---
+    def tuning(self) -> dict:
+        """Current values of the live-tunable pacing knobs."""
+        from .tuning import tuning_view
+
+        with self._cv:
+            return tuning_view(self._cfg)
+
+    def set_tuning(self, updates: dict) -> dict:
+        """Validate and apply pacing-knob ``updates`` at runtime (thread-safe).
+
+        Clamps the live limit into any new ``[min_limit, max_limit]`` and wakes
+        blocked workers so a changed ceiling takes effect at once. Raises
+        ``ValueError`` on a bad edit; nothing is half-applied.
+        """
+        from .tuning import apply_tuning, tuning_view
+
+        with self._cv:
+            new_cfg = apply_tuning(self._cfg, updates)
+            self._cfg = new_cfg
+            self._limit = max(new_cfg.min_limit, min(self._limit, new_cfg.max_limit))
+            view = tuning_view(new_cfg)
+            self._cv.notify_all()
+        self.report.add_event("tuning_changed", f"applied {updates}")
+        return view
+
     def snapshot(self, window: int = 240, event_window: int = 40) -> dict:
         """A thread-safe, JSON-ready view of the governor's live state.
 
@@ -191,6 +217,8 @@ class Governor:
         recent timeline from the report. Safe to call from another thread (e.g.
         a dashboard HTTP handler) while the governor is running.
         """
+        from .tuning import tuning_view
+
         with self._cv:
             live = {
                 "mode": self._mode.value,
@@ -200,6 +228,7 @@ class Governor:
                 "running": self._sampler is not None and not self._stop.is_set(),
                 "max_limit": self._cfg.max_limit,
                 "min_limit": self._cfg.min_limit,
+                "tuning": tuning_view(self._cfg),
             }
         timeline = self.report.snapshot(window=window, event_window=event_window)
         return {**live, **timeline}

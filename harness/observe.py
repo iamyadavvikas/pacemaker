@@ -1,25 +1,32 @@
 """``dbguard observe`` — standalone, read-only DB guardrail you can WATCH.
 
-This is the product wedge as a sidecar. It attaches to a live Postgres with a
-read-only role, attributes backends into a *migration* cohort vs *prod* traffic,
-and runs the AIMD pacing policy **in shadow** — recording exactly when it *would*
-have throttled the migration, while never blocking, cancelling, or touching the
-database. It serves the live dashboard plus a gh-ost/pt-osc-compatible
-``/throttle`` endpoint, and writes an evidence report on exit.
+This is the product wedge as a sidecar. It attaches to a live **Postgres or
+MongoDB** with a read-only role, attributes backends/ops into a *migration*
+cohort vs *prod* traffic, and runs the AIMD pacing policy **in shadow** —
+recording exactly when it *would* have throttled the migration, while never
+blocking, cancelling, or touching the database. It serves the live dashboard
+plus a gh-ost/pt-osc-compatible ``/throttle`` endpoint, and writes an evidence
+report on exit.
 
-    # against your own DB, read-only role, observe-only:
+    # against your own Postgres, read-only role, observe-only:
     dbguard observe --dsn postgresql://gov_sensor:pw@host:5432/app \
         --migration-user backfill_job \
         --report reports/observe.json
 
-    # or drive the bundled synthetic multi-squad demo:
+    # against MongoDB / Atlas (read-only clusterMonitor user, secondary read pref):
+    dbguard observe --dsn "mongodb://gov_ro:pw@host:27017/?readPreference=secondaryPreferred" \
+        --migration-tag dbguard:migration \
+        --report reports/observe-mongo.json
+
+    # or drive the bundled synthetic multi-squad Postgres demo:
     docker compose up -d db
     python -m harness.observe --demo
 
-Everything here is read-only and side-effect free against the target DB.
-The migration tool (or app job) consults ``GET /throttle`` (HTTP 200 = proceed,
-429 = back off) — in OBSERVE the verdict is advisory; the dashboard shows what it
-*would* have signalled.
+The engine is auto-detected from the DSN scheme (``mongodb://`` /
+``mongodb+srv://`` → MongoDB, otherwise Postgres). Everything here is read-only
+and side-effect free against the target DB. The migration tool (or app job)
+consults ``GET /throttle`` (HTTP 200 = proceed, 429 = back off) — in OBSERVE the
+verdict is advisory; the dashboard shows what it *would* have signalled.
 """
 
 from __future__ import annotations
@@ -27,7 +34,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import threading
 import time
 import webbrowser
 
@@ -39,11 +45,17 @@ from governor import (
     GovernorConfig,
     ObserverAgent,
     PostgresSensor,
+    Thresholds,
 )
 from governor.attribution import DEFAULT_QUERY_TAG
 
 from . import DSN
 from .checkout_probe import CheckoutProbe
+
+
+def _is_mongo_dsn(dsn: str) -> bool:
+    """True if the DSN targets MongoDB (so we build a read-only MongoSensor)."""
+    return dsn.startswith("mongodb://") or dsn.startswith("mongodb+srv://")
 
 
 def _wait_for_db(dsn: str, timeout_s: float = 60.0) -> None:
@@ -57,6 +69,53 @@ def _wait_for_db(dsn: str, timeout_s: float = 60.0) -> None:
             last_err = e
             time.sleep(1.0)
     raise RuntimeError(f"database not reachable at {dsn}: {last_err}")
+
+
+def _wait_for_mongo(uri: str, timeout_s: float = 60.0) -> None:
+    from pymongo import MongoClient  # lazy: pymongo is an optional dependency
+
+    deadline = time.time() + timeout_s
+    last_err = None
+    while time.time() < deadline:
+        try:
+            client = MongoClient(uri, serverSelectionTimeoutMS=2000)
+            client.admin.command("ping")
+            client.close()
+            return
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            time.sleep(1.0)
+    raise RuntimeError(f"mongo not reachable at {uri}: {last_err}")
+
+
+def _calibrate_thresholds(sensor, seconds: float, poll_s: float = 0.25) -> Thresholds | None:
+    """Observe real ambient load for ``seconds`` and derive headroom thresholds.
+
+    The shipped defaults are tuned for a 1-CPU demo and will read YELLOW/RED at
+    idle against a real database whose normal active-backend count is higher.
+    This samples the live ``active_backends`` distribution read-only and maps its
+    percentiles onto GREEN/YELLOW/CRITICAL bounds so the level reflects *this*
+    database's baseline, not the demo's. Returns ``None`` if no samples landed.
+    """
+    actives: list[int] = []
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        try:
+            actives.append(sensor.sample().active_backends)
+        except Exception:  # noqa: BLE001 - a transient read must not abort calibration
+            pass
+        time.sleep(poll_s)
+    if not actives:
+        return None
+    actives.sort()
+
+    def pct(p: float) -> int:
+        return actives[min(len(actives) - 1, int(round(p * (len(actives) - 1))))]
+
+    green = max(1, pct(0.50))
+    yellow = max(green + 1, pct(0.75))
+    critical = max(yellow + 2, pct(0.95) + 2)
+    return Thresholds(green_max_active=green, yellow_max_active=yellow, critical_active=critical)
 
 
 # Read-only probe used in --demo to measure checkout latency without writing to
@@ -157,7 +216,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--dsn",
         default=os.environ.get("GOV_DEMO_DSN", DSN),
-        help="Postgres DSN (use a read-only role in production). Default: GOV_DEMO_DSN.",
+        help="Postgres or MongoDB DSN (use a read-only role in production). Engine is "
+        "auto-detected from the scheme (mongodb:// -> MongoDB). Default: GOV_DEMO_DSN.",
     )
     p.add_argument(
         "--migration-user",
@@ -196,10 +256,35 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--no-open", action="store_true", help="don't auto-open the browser")
     p.add_argument(
+        "--preflight",
+        action="store_true",
+        help="run the read-only safety + sensor-accuracy check first, and abort if it "
+        "fails, before starting to observe (ignored with --demo).",
+    )
+    p.add_argument(
+        "--calibrate",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="observe ambient load for SECONDS read-only, then derive GREEN/YELLOW/"
+        "CRITICAL active-backend thresholds from this DB's own baseline before "
+        "starting (the shipped defaults are tuned for a 1-CPU demo).",
+    )
+    p.add_argument(
+        "--track-secondary",
+        action="store_true",
+        help="also read replication lag + connection-pool saturation (Postgres reads "
+        "these only when enabled; Mongo reads them by default). Surfaced on the "
+        "dashboard/report; only escalates the level if the matching thresholds are set.",
+    )
+    p.add_argument(
         "--demo",
         action="store_true",
         help="run the bundled synthetic multi-squad load (migration vs checkout) to watch.",
     )
+    from .notifiers import add_notifier_args
+
+    add_notifier_args(p)
     return p
 
 
@@ -262,6 +347,22 @@ def _evidence_report(
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     dsn = args.dsn
+    is_mongo = _is_mongo_dsn(dsn)
+
+    if is_mongo and args.demo:
+        print(
+            "error: --demo is Postgres-only (it seeds synthetic data). For a Mongo demo\n"
+            "       use:  python -m harness.mongodemo",
+            file=sys.stderr,
+        )
+        return 2
+    if is_mongo and args.probe_query:
+        print(
+            "error: --probe-query is SQL (Postgres-only). Against MongoDB the latency\n"
+            "       canary is the sensor's own read-only currentOp probe.",
+            file=sys.stderr,
+        )
+        return 2
 
     demo_threads = None
     if args.demo:
@@ -286,8 +387,28 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    print(f"waiting for database at {dsn} ...", flush=True)
-    _wait_for_db(dsn)
+    if is_mongo:
+        print(f"waiting for mongo at {dsn} ...", flush=True)
+        _wait_for_mongo(dsn)
+    else:
+        print(f"waiting for database at {dsn} ...", flush=True)
+        _wait_for_db(dsn)
+
+    if args.preflight and not args.demo:
+        # Run the read-only safety + sensor-accuracy check first; abort observing
+        # if it can't even confirm the sensor reads this target correctly.
+        from .preflight import main as preflight_main
+
+        pf_argv = ["--dsn", dsn]
+        for u in args.migration_user:
+            pf_argv += ["--migration-user", u]
+        for a in args.migration_app:
+            pf_argv += ["--migration-app", a]
+        pf_argv += ["--migration-tag", args.migration_tag]
+        if preflight_main(pf_argv) != 0:
+            print("\nerror: preflight failed; not starting observe.", file=sys.stderr)
+            return 1
+        print("\n  preflight passed — starting observe ...\n", flush=True)
 
     cfg = GovernorConfig(dsn=dsn)
     probe_sql = args.probe_query
@@ -312,10 +433,50 @@ def main(argv: list[str] | None = None) -> int:
         )
         demo_threads = start_demo_load(dsn)
 
-    probe = CheckoutProbe(dsn, probe_sql=probe_sql) if probe_sql else None
+    probe = CheckoutProbe(dsn, probe_sql=probe_sql) if (probe_sql and not is_mongo) else None
 
-    sensor = PostgresSensor(dsn, classifier=classifier)
-    agent = ObserverAgent(cfg, sensor)
+    from .notifiers import build_notifier
+
+    notifier = build_notifier(args)
+
+    def _build_sensor(thresholds: Thresholds | None):
+        if is_mongo:
+            from governor import MongoSensor
+
+            return MongoSensor(
+                dsn,
+                thresholds=thresholds,
+                classifier=classifier,
+                track_replication=True,
+                track_connections=True,
+            )
+        return PostgresSensor(
+            dsn,
+            thresholds=thresholds,
+            classifier=classifier,
+            track_replication=args.track_secondary,
+            track_connections=args.track_secondary,
+        )
+
+    thresholds = None
+    if args.calibrate:
+        print(
+            f"calibrating thresholds from ~{args.calibrate:g}s of live load ...",
+            flush=True,
+        )
+        thresholds = _calibrate_thresholds(_build_sensor(None), args.calibrate)
+        if thresholds is None:
+            print("  calibration got no samples; using shipped defaults.", flush=True)
+        else:
+            print(
+                f"  derived thresholds: green<={thresholds.green_max_active}"
+                f" yellow<={thresholds.yellow_max_active}"
+                f" critical>={thresholds.critical_active} active backends.",
+                flush=True,
+            )
+
+    sensor = _build_sensor(thresholds)
+    agent = ObserverAgent(cfg, sensor, notifier=notifier)
     dashboard = DashboardServer(
         agent,
         host=args.host,
@@ -396,9 +557,15 @@ def cli() -> int:
         from .enforce import main as enforce_main
 
         return enforce_main(argv[1:])
+    if argv and argv[0] == "preflight":
+        from .preflight import main as preflight_main
+
+        return preflight_main(argv[1:])
     if argv and argv[0] in ("-h", "--help", "help"):
         print(
             "usage:\n"
+            "  dbguard preflight [options]  read-only safety + sensor-accuracy check "
+            "(see: dbguard preflight --help)\n"
             "  dbguard observe [options]   read-only shadow guardrail "
             "(see: dbguard observe --help)\n"
             "  dbguard enforce [options]   out-of-band non-cooperative pacing "

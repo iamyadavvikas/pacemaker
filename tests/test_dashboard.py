@@ -262,6 +262,69 @@ def test_auth_gate_protects_post_mode():
         gov.stop()
 
 
+def test_post_tuning_applies_and_state_reflects():
+    gov = _make_governor(Mode.OBSERVE)
+    gov.start()
+    dash = DashboardServer(gov, host="127.0.0.1", port=0)
+    dash.start()
+    try:
+        code, body = _post(dash.url + "/api/tuning", {"max_limit": 16, "decrease_factor": 0.25})
+        assert code == 200
+        view = json.loads(body)["tuning"]
+        assert view["max_limit"] == 16
+        assert view["decrease_factor"] == 0.25
+
+        _, body = _get(dash.url + "/api/state")
+        assert json.loads(body)["tuning"]["max_limit"] == 16
+    finally:
+        dash.stop()
+        gov.stop()
+
+
+def test_post_tuning_rejects_bad_value_400():
+    gov = _make_governor(Mode.OBSERVE)
+    gov.start()
+    dash = DashboardServer(gov, host="127.0.0.1", port=0)
+    dash.start()
+    try:
+        for bad in (b"not json", {"max_limit": -1}, {"bogus": 1}, [1, 2]):
+            try:
+                _post(dash.url + "/api/tuning", bad)
+                raise AssertionError("expected HTTP 400")
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 400
+    finally:
+        dash.stop()
+        gov.stop()
+
+
+def test_post_tuning_405_when_unsupported():
+    class _NoTuning:
+        """A governor-like object exposing snapshot() but no set_tuning."""
+
+        def snapshot(self, **_kw):
+            return {
+                "mode": "observe",
+                "limit": 1,
+                "in_flight": 0,
+                "last_level": "GREEN",
+                "running": True,
+                "samples": [],
+                "events": [],
+            }
+
+    dash = DashboardServer(_NoTuning(), host="127.0.0.1", port=0)
+    dash.start()
+    try:
+        try:
+            _post(dash.url + "/api/tuning", {"max_limit": 5})
+            raise AssertionError("expected HTTP 405")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 405
+    finally:
+        dash.stop()
+
+
 def test_snapshot_stable_under_concurrent_sampling():
     """snapshot() must never tear while the sampler thread mutates state."""
     gov = _make_governor()

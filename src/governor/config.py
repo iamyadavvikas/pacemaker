@@ -20,6 +20,34 @@ class Thresholds:
     # Any blocked (lock-waiting) backend forces at least RED.
     blocked_forces_red: bool = True
 
+    # --- Secondary signals (optional; ``None`` disables that signal) ---
+    # These let a sensor escalate the headroom level on signals other than raw
+    # active-backend count. A breach can only raise the level (never lower it),
+    # so adding them is always at least as conservative. Wired up by sensors that
+    # can read them (e.g. the Postgres sensor reads replication lag / connection
+    # saturation; the Mongo sensor reads replica-set lag and connection counts).
+
+    # Replication lag (seconds) — protects read replicas / Aurora reader fleets
+    # that a heavy backfill can stall. The first breached bound wins.
+    yellow_replication_lag_s: float | None = None
+    red_replication_lag_s: float | None = None
+    critical_replication_lag_s: float | None = None
+
+    # Connection-pool saturation as a fraction in [0, 1] of used/max connections.
+    # Running out of connections is its own outage mode (the May 2025 / 2020
+    # "consumed all sessions" incidents), independent of active-query count.
+    yellow_conn_pool_frac: float | None = None
+    red_conn_pool_frac: float | None = None
+    critical_conn_pool_frac: float | None = None
+
+    # Query latency (p99, milliseconds) measured at the DB layer by the sensor's
+    # own probe — the canary that degrades when a backfill saturates the engine.
+    # Lets the governor react to *user-visible slowness* directly, not just to
+    # backend counts. The first breached bound wins.
+    yellow_query_latency_ms: float | None = None
+    red_query_latency_ms: float | None = None
+    critical_query_latency_ms: float | None = None
+
 
 @dataclass(frozen=True)
 class GovernorConfig:
@@ -32,6 +60,14 @@ class GovernorConfig:
     additive_increase: int = 1
     decrease_factor: float = 0.5
     thresholds: Thresholds = field(default_factory=Thresholds)
+
+    # Throttle-only vs pause. When True (default) a CRITICAL reading drops the
+    # limit to 0 — a full circuit-break (pause-all). When False the policy never
+    # fully stops the job: even at CRITICAL it only multiplicatively *decreases*
+    # toward ``min_limit``. This is the "slow down, don't stop" mode for teams
+    # that have proven they can already manually halt a migration and instead
+    # want adaptive throttling with no 2am "restart the job" page.
+    pause_on_critical: bool = True
 
     # --- Stage 2 enforcement (EnforcerAgent only; ignored by Governor/Observer) ---
     # A SEPARATE privileged/write connection used only to apply back-pressure to

@@ -6,7 +6,6 @@ import itertools
 
 from governor.sensors.base import CohortLoad, Headroom, Level, Sensor
 
-
 class FakeSensor(Sensor):
     """Returns scripted headroom levels; optionally raises to simulate an unreachable DB."""
 
@@ -53,6 +52,53 @@ class FakeCohortSensor(Sensor):
                 "prod": CohortLoad(active=max(total_active - mig_active, 0), blocked=0),
             },
         )
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeMongoClient:
+    """Minimal stand-in for a pymongo MongoClient for MongoSensor tests.
+
+    Scripts the three admin commands the sensor uses (``currentOp``,
+    ``serverStatus``, ``replSetGetStatus``) so tests can drive the sensor without
+    a real MongoDB. ``killOp`` is recorded for MongoKiller tests.
+    """
+
+    def __init__(
+        self,
+        inprog=None,
+        connections=None,
+        repl_status=None,
+        repl_raises=False,
+    ) -> None:
+        self._inprog = inprog or []
+        self._connections = connections
+        self._repl_status = repl_status
+        self._repl_raises = repl_raises
+        self.killed_ops: list[int] = []
+        self.closed = False
+        self.admin = self._Admin(self)
+
+    class _Admin:
+        def __init__(self, outer: "FakeMongoClient") -> None:
+            self._outer = outer
+
+        def command(self, cmd, *args, **kwargs):
+            o = self._outer
+            name = cmd if isinstance(cmd, str) else next(iter(cmd))
+            if name == "currentOp":
+                return {"inprog": o._inprog}
+            if name == "serverStatus":
+                return {"connections": o._connections or {}}
+            if name == "replSetGetStatus":
+                if o._repl_raises:
+                    raise RuntimeError("not running with --replSet")
+                return o._repl_status or {"members": []}
+            if name == "killOp":
+                o.killed_ops.append(cmd["op"])
+                return {"ok": 1}
+            raise ValueError(f"unexpected command: {name}")
 
     def close(self) -> None:
         self.closed = True

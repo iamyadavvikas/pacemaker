@@ -16,7 +16,10 @@ from ..sensors.base import Level
 def next_limit(current: int, level: Level, cfg: GovernorConfig) -> int:
     """Compute the next concurrency limit given the current one and headroom."""
     if level is Level.CRITICAL:
-        return 0  # circuit-break: pause all new batches
+        if cfg.pause_on_critical:
+            return 0  # circuit-break: pause all new batches
+        # Throttle-only: never fully stop, just decrease hard toward min_limit.
+        return max(cfg.min_limit, math.floor(current * cfg.decrease_factor))
     if level is Level.RED:
         decreased = math.floor(current * cfg.decrease_factor)
         return max(cfg.min_limit, decreased)

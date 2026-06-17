@@ -32,6 +32,26 @@ services:
       timeout: 3s
       retries: 30
 
+  # Small, CPU-limited MongoDB for the Mongo observe demo (harness.mongodemo).
+  # Same idea as the Postgres `db` service: constrain it so a heavy backfill
+  # creates visible contention. Synthetic data only.
+  mongo:
+    image: mongo:7
+    container_name: gov-demo-mongo
+    command: ["mongod", "--wiredTigerCacheSizeGB", "0.25"]
+    ports:
+      - "27017:27017"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   # Live dashboard + looping governed backfill. Reaches the DB over the compose
   # network at db:5432 (not the host-mapped 5544). Binds 0.0.0.0 inside the
   # container; the dashboard is unauthenticated, so keep this network private.
@@ -46,5 +66,30 @@ services:
       GOV_DASH_PORT: "8765"
       GOV_DEMO_DSN: "postgresql://gov:govpass@db:5432/govdemo"
       GOV_MODE: "enforce"
+    ports:
+      - "8765:8765"
+
+  # Read-only OBSERVE sidecar (the productized form). Profile-gated so it does
+  # NOT start with the default demo; bring it up explicitly:
+  #
+  #   docker compose --profile observe up observe
+  #
+  # Against a REAL database, override GOV_DEMO_DSN with a read-only role DSN
+  # (Postgres: deploy/governor_readonly_role.sql; Mongo: deploy/governor_readonly_role.js)
+  # and ALWAYS set GOV_DASH_TOKEN before exposing it. The engine is auto-detected
+  # from the DSN scheme. This container never writes, cancels, or locks anything.
+  observe:
+    build: .
+    container_name: gov-observe
+    profiles: ["observe"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GOV_DASH_HOST: "0.0.0.0"
+      GOV_DASH_PORT: "8765"
+      GOV_DEMO_DSN: "${GOV_DEMO_DSN:-postgresql://gov:govpass@db:5432/govdemo}"
+      GOV_DASH_TOKEN: "${GOV_DASH_TOKEN:-}"
+    command: ["dbguard", "observe", "--no-open", "--migration-tag", "dbguard:migration"]
     ports:
       - "8765:8765"

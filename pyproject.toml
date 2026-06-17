@@ -14,10 +14,12 @@ dependencies = [
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.7"]
-dev = ["pytest>=8.0", "matplotlib>=3.7"]
+mongo = ["pymongo>=4.6"]
+dev = ["pytest>=8.0", "matplotlib>=3.7", "pymongo>=4.6"]
 
 [project.scripts]
 governor-live = "harness.live:main"
+governor-mongo = "harness.mongodemo:main"
 dbguard = "harness.observe:cli"
 
 [tool.setuptools.packages.find]

@@ -37,3 +37,22 @@ def test_red_respects_min_limit():
 
 def test_critical_circuit_breaks_to_zero():
     assert next_limit(6, Level.CRITICAL, CFG) == 0
+
+
+def test_critical_throttle_only_decreases_not_pauses():
+    # pause_on_critical=False -> never drops to 0; decreases toward min_limit.
+    cfg = GovernorConfig(
+        dsn="x", min_limit=1, max_limit=6, decrease_factor=0.5, pause_on_critical=False
+    )
+    assert next_limit(6, Level.CRITICAL, cfg) == 3
+    assert next_limit(2, Level.CRITICAL, cfg) == 1
+    # never below min_limit
+    assert next_limit(1, Level.CRITICAL, cfg) == 1
+
+
+def test_critical_throttle_only_respects_higher_min_limit():
+    cfg = GovernorConfig(
+        dsn="x", min_limit=2, max_limit=8, decrease_factor=0.5, pause_on_critical=False
+    )
+    assert next_limit(3, Level.CRITICAL, cfg) == 2  # floor(3*0.5)=1 -> clamped to min 2
+

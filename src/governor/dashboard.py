@@ -117,6 +117,24 @@ class DashboardServer:
         new_mode = self._governor.set_mode(payload["mode"])
         return 200, {"mode": new_mode.value}
 
+    # --- control: live tuning (self-service pacing knobs) ---
+    def _set_tuning(self, body: bytes) -> tuple[int, dict]:
+        """Handle a POST /api/tuning body. Returns (http_status, json_dict)."""
+        set_tuning = getattr(self._governor, "set_tuning", None)
+        if not callable(set_tuning):
+            return 405, {"error": "tuning is not supported by this server"}
+        try:
+            payload = json.loads(body or b"{}")
+        except (ValueError, TypeError):
+            return 400, {"error": "invalid JSON body"}
+        if not isinstance(payload, dict):
+            return 400, {"error": "body must be a JSON object of knob -> value"}
+        try:
+            view = set_tuning(payload)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+        return 200, {"tuning": view}
+
     # --- throttle verdict (gh-ost --throttle-http / pt-osc compatible) ---
     def _throttle_verdict(self) -> tuple[int, dict]:
         """Return (http_status, body) for the throttle endpoint.
@@ -268,6 +286,15 @@ def _make_handler(server: DashboardServer):
                     length = 0
                 body = self.rfile.read(length) if length > 0 else b""
                 code, payload = server._set_mode(body)
+                self._send(code, json.dumps(payload).encode("utf-8"), "application/json")
+                return
+            if path == "/api/tuning":
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or "0")
+                except ValueError:
+                    length = 0
+                body = self.rfile.read(length) if length > 0 else b""
+                code, payload = server._set_tuning(body)
                 self._send(code, json.dumps(payload).encode("utf-8"), "application/json")
                 return
             self._send(404, b'{"error":"not found"}', "application/json")

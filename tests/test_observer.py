@@ -80,6 +80,23 @@ def test_sensor_error_fails_safe_to_throttle():
         agent.stop()
 
 
+def test_notifier_fires_on_throttle_episode():
+    from governor.notify import CallbackNotifier
+
+    seen = []
+    notifier = CallbackNotifier(lambda kind, msg, ctx: seen.append(kind))
+    cfg = GovernorConfig(dsn="fake", poll_interval_s=0.01)
+    agent = ObserverAgent(cfg, FakeCohortSensor([(Level.CRITICAL, 5)]), notifier=notifier)
+    agent.start()
+    try:
+        _wait()
+    finally:
+        agent.stop()
+    # a CRITICAL migration episode should have alerted on-call
+    assert "throttle_started" in seen or "would_circuit_break" in seen
+
+
+
 def test_never_enforces_observer_has_no_set_mode():
     agent = _agent([(Level.GREEN, 0)])
     # observe-only: it must not expose a runtime enforce switch

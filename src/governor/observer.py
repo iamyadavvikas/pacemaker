@@ -34,6 +34,7 @@ from .config import GovernorConfig
 from .policy.aimd import next_limit
 from .report import Report, Sample
 from .sensors.base import CohortLoad, Headroom, Level, Sensor
+from .tuning import apply_tuning, tuning_view as _tuning_view
 
 
 class ObserverAgent:
@@ -44,10 +45,14 @@ class ObserverAgent:
         config: GovernorConfig,
         sensor: Sensor,
         report: Report | None = None,
+        notifier=None,
     ) -> None:
         self._cfg = config
         self._sensor = sensor
         self.report = report or Report(label="observe")
+        from .notify import NullNotifier
+
+        self._notifier = notifier or NullNotifier()
 
         # Shadow concurrency limit for the migration cohort.
         self._limit = config.start_limit
@@ -56,6 +61,10 @@ class ObserverAgent:
         self._migration_blocked = 0
         self._would_throttle = False
         self._would_throttle_total = 0
+        # Last-read secondary signals (None until the sensor supplies them).
+        self._replication_lag_s: float | None = None
+        self._conn_pool_frac: float | None = None
+        self._query_latency_ms: float | None = None
 
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -81,6 +90,7 @@ class ObserverAgent:
 
     # --- the sampling/shadow-control loop ---
     def _sample_loop(self) -> None:
+        was_throttling = False
         while not self._stop.is_set():
             try:
                 hr = self._sensor.sample()
@@ -108,6 +118,9 @@ class ObserverAgent:
                 self._would_throttle = would_throttle
                 if would_throttle:
                     self._would_throttle_total += 1
+                self._replication_lag_s = hr.replication_lag_s
+                self._conn_pool_frac = hr.conn_pool_frac
+                self._query_latency_ms = hr.query_latency_ms
                 self.report.add_sample(
                     Sample(
                         t=time.time() - self.report.started_at,
@@ -124,10 +137,16 @@ class ObserverAgent:
                     "sensor_error",
                     f"sensor unreadable ({sensor_error!r}) -> fail-safe pause",
                 )
+                self._notify("sensor_error", f"sensor unreadable ({sensor_error!r}) -> fail-safe pause")
             elif would_throttle and hr.level is Level.CRITICAL:
                 self.report.add_event(
                     "would_circuit_break",
                     f"migration active={mig.active} at {hr.level.name} -> would pause",
+                )
+                self._notify(
+                    "would_circuit_break",
+                    f"migration active={mig.active} at CRITICAL -> would pause",
+                    {"migration_active": mig.active, "level": hr.level.name},
                 )
             elif would_throttle:
                 self.report.add_event(
@@ -140,7 +159,24 @@ class ObserverAgent:
                     f"{hr.level.name}: shadow limit {old_limit} -> {new_limit}",
                 )
 
+            # Edge-detect a new throttling episode so on-call gets ONE alert per
+            # episode, not one per ~4Hz poll.
+            if would_throttle and not was_throttling:
+                self._notify(
+                    "throttle_started",
+                    f"would begin throttling migration (active={mig.active}, "
+                    f"shadow limit={new_limit}, {hr.level.name})",
+                    {"migration_active": mig.active, "limit": new_limit, "level": hr.level.name},
+                )
+            was_throttling = would_throttle
+
             self._stop.wait(self._cfg.poll_interval_s)
+
+    def _notify(self, kind: str, message: str, context: dict | None = None) -> None:
+        try:
+            self._notifier.notify(kind, message, context)
+        except Exception:  # noqa: BLE001 - alerting must never break the loop
+            pass
 
     # --- the throttle verdict (for gh-ost/pt-osc compatible endpoint) ---
     def throttle_verdict(self) -> dict:
@@ -158,6 +194,28 @@ class ObserverAgent:
                 "level": self._last_level.name,
             }
 
+    # --- live tuning (self-service pacing knobs) ---
+    def tuning(self) -> dict:
+        """Current values of the live-tunable pacing knobs."""
+        with self._lock:
+            return _tuning_view(self._cfg)
+
+    def set_tuning(self, updates: dict) -> dict:
+        """Validate and apply pacing-knob ``updates`` at runtime (thread-safe).
+
+        Clamps the shadow limit into any new ``[min_limit, max_limit]`` so a
+        lowered ceiling takes effect immediately. Raises ``ValueError`` on a bad
+        edit (the dashboard surfaces the message); nothing is half-applied.
+        """
+        with self._lock:
+            new_cfg = apply_tuning(self._cfg, updates)
+            self._cfg = new_cfg
+            self._limit = max(new_cfg.min_limit, min(self._limit, new_cfg.max_limit))
+            view = _tuning_view(new_cfg)
+        self.report.add_event("tuning_changed", f"applied {updates}")
+        self._notify("tuning_changed", "pacing knobs updated", dict(updates))
+        return view
+
     def snapshot(self, window: int = 240, event_window: int = 40) -> dict:
         """JSON-ready view of the observer's live state, for the dashboard."""
         with self._lock:
@@ -173,6 +231,10 @@ class ObserverAgent:
                 "migration_blocked": self._migration_blocked,
                 "would_throttle_now": self._would_throttle,
                 "would_throttle_total": self._would_throttle_total,
+                "replication_lag_s": self._replication_lag_s,
+                "conn_pool_frac": self._conn_pool_frac,
+                "query_latency_ms": self._query_latency_ms,
+                "tuning": _tuning_view(self._cfg),
             }
         timeline = self.report.snapshot(window=window, event_window=event_window)
         return {**live, **timeline}

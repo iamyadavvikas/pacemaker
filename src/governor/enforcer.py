@@ -115,6 +115,7 @@ class EnforcerAgent:
         sensor: Sensor,
         canceller: Canceller | None = None,
         report: Report | None = None,
+        notifier=None,
     ) -> None:
         self._cfg = config
         self._sensor = sensor
@@ -122,6 +123,9 @@ class EnforcerAgent:
         # for the demo where the same role owns the migration backends).
         self._canceller = canceller or PostgresCanceller(config.control_dsn or config.dsn)
         self.report = report or Report(label="enforce")
+        from .notify import NullNotifier
+
+        self._notifier = notifier or NullNotifier()
 
         self._limit = config.start_limit
         self._last_level = Level.GREEN
@@ -228,6 +232,10 @@ class EnforcerAgent:
                     "sensor_error",
                     f"sensor unreadable ({sensor_error!r}) -> fail-open, no cancels this tick",
                 )
+                self._notify(
+                    "sensor_error",
+                    f"sensor unreadable ({sensor_error!r}) -> fail-open, no cancels this tick",
+                )
             for pid, signal in cancelled:
                 self.report.add_event(
                     "cancel",
@@ -240,6 +248,12 @@ class EnforcerAgent:
                     f"runaway guard: > {self._cfg.runaway_cancel_threshold} cancels in "
                     f"{self._cfg.runaway_window_s}s -> enforcement disabled, observing only",
                 )
+                self._notify(
+                    "enforcer_tripped",
+                    f"runaway guard tripped: > {self._cfg.runaway_cancel_threshold} cancels in "
+                    f"{self._cfg.runaway_window_s}s -> enforcement disabled, observing only",
+                    {"cancels_total": self._cancels_total},
+                )
             elif not cancelled and new_limit < old_limit:
                 self.report.add_event(
                     "backoff",
@@ -247,6 +261,12 @@ class EnforcerAgent:
                 )
 
             self._stop.wait(self._cfg.poll_interval_s)
+
+    def _notify(self, kind: str, message: str, context: dict | None = None) -> None:
+        try:
+            self._notifier.notify(kind, message, context)
+        except Exception:  # noqa: BLE001 - alerting must never break the loop
+            pass
 
     # --- throttle verdict (for gh-ost/pt-osc compatible endpoint) ---
     def throttle_verdict(self) -> dict:

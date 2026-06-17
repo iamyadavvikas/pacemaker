@@ -103,8 +103,22 @@
   .log .kind.enforcer_tripped { color: var(--yellow); }
   .log .detail { color: var(--text); }
   .log .empty { color: var(--muted); padding: 8px 0; }
-</style>
-</head>
+  .log .kind.tuning_changed { color: var(--accent); }
+
+  .tuning { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+  .tuning h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 14px; text-transform: uppercase; letter-spacing: .6px; }
+  .tuning .tuning-hint { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); }
+  .tuning-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 18px; align-items: end; }
+  @media (max-width: 760px) { .tuning-grid { grid-template-columns: 1fr 1fr; } }
+  .tuning-grid label { display: flex; flex-direction: column; gap: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+  .tuning-grid input[type="number"] { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 7px 9px; font: inherit; font-variant-numeric: tabular-nums; }
+  .tuning-grid input:focus { outline: none; border-color: var(--accent); }
+  .tuning-check { flex-direction: row !important; align-items: center; gap: 8px !important; text-transform: none !important; letter-spacing: 0 !important; color: var(--text) !important; font-size: 13px !important; }
+  .tuning-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; }
+  .tuning-msg { font-size: 12px; }
+  .tuning-msg.ok { color: var(--green); }
+  .tuning-msg.err { color: var(--red); }
+</style></head>
 <body>
 <header>
   <h1>pacing-governor</h1>
@@ -136,6 +150,13 @@
     </div>
   </div>
 
+  <div class="tiles">
+    <div class="tile"><div class="k">Query latency p99</div><div id="qlat" class="v">—</div><div class="sub">DB-layer probe (ms)</div></div>
+    <div class="tile"><div class="k">Replication lag</div><div id="replag" class="v">—</div><div class="sub">worst replica (s)</div></div>
+    <div class="tile"><div class="k">Connection pool</div><div id="connpool" class="v">—</div><div class="sub">used / max</div></div>
+    <div class="tile"><div class="k">Would-throttle</div><div id="wtt" class="v">—</div><div class="sub">total shadow hits</div></div>
+  </div>
+
   <div class="charts">
     <div class="chart-card">
       <h2>DB backends &amp; allowed limit</h2>
@@ -150,6 +171,22 @@
   <div class="events">
     <h2>Governor decisions</h2>
     <div id="log" class="log"><div class="empty">No events yet…</div></div>
+  </div>
+
+  <div class="tuning" id="tuningPanel">
+    <h2>Pacing knobs <span class="tuning-hint">— self-service, applied live</span></h2>
+    <form id="tuningForm" class="tuning-grid">
+      <label>Max concurrency<input type="number" id="t_max_limit" min="1" step="1" /></label>
+      <label>Min concurrency<input type="number" id="t_min_limit" min="1" step="1" /></label>
+      <label>Additive increase<input type="number" id="t_additive_increase" min="1" step="1" /></label>
+      <label>Decrease factor<input type="number" id="t_decrease_factor" min="0.05" max="0.95" step="0.05" /></label>
+      <label>Poll interval (s)<input type="number" id="t_poll_interval_s" min="0.01" max="10" step="0.05" /></label>
+      <label class="tuning-check"><input type="checkbox" id="t_pause_on_critical" /> Pause fully at CRITICAL <span class="tuning-hint">(off = throttle-only)</span></label>
+      <div class="tuning-actions">
+        <button type="submit" class="mode-btn" id="tuningApply">Apply</button>
+        <span id="tuningMsg" class="tuning-msg"></span>
+      </div>
+    </form>
   </div>
 </main>
 
@@ -221,6 +258,11 @@ function renderTiles(s) {
   el("active").textContent = active == null || active < 0 ? "—" : active;
   el("blocked").textContent = blocked == null || blocked < 0 ? "—" : blocked;
   el("blockedTile").className = "tile" + (blocked > 0 ? " warn" : "");
+  // secondary signals
+  el("qlat").textContent = s.query_latency_ms != null ? s.query_latency_ms : "—";
+  el("replag").textContent = s.replication_lag_s != null ? (+s.replication_lag_s).toFixed(2) : "—";
+  el("connpool").textContent = s.conn_pool_frac != null ? (s.conn_pool_frac * 100).toFixed(0) + "%" : "—";
+  el("wtt").textContent = s.would_throttle_total ?? "—";
 }
 
 function renderMode(mode) {
@@ -259,6 +301,60 @@ async function toggleMode() {
 }
 
 document.getElementById("modeBtn").addEventListener("click", toggleMode);
+
+// --- self-service tuning ---
+const TUNING_FIELDS = ["max_limit", "min_limit", "additive_increase", "decrease_factor", "poll_interval_s"];
+let tuningDirty = false;
+["tuningForm"].forEach((id) => {
+  const f = document.getElementById(id);
+  f.addEventListener("input", () => { tuningDirty = true; });
+});
+
+function renderTuning(t) {
+  if (!t) { document.getElementById("tuningPanel").hidden = true; return; }
+  document.getElementById("tuningPanel").hidden = false;
+  // don't clobber a value the user is mid-edit
+  if (tuningDirty || document.activeElement && document.activeElement.closest("#tuningForm")) return;
+  for (const k of TUNING_FIELDS) {
+    const input = el("t_" + k);
+    if (input && t[k] != null) input.value = t[k];
+  }
+  const chk = el("t_pause_on_critical");
+  if (chk && t.pause_on_critical != null) chk.checked = !!t.pause_on_critical;
+}
+
+async function submitTuning(ev) {
+  ev.preventDefault();
+  const body = {};
+  for (const k of TUNING_FIELDS) {
+    const input = el("t_" + k);
+    if (input && input.value !== "") body[k] = input.value.includes(".") || k === "decrease_factor" || k === "poll_interval_s" ? parseFloat(input.value) : parseInt(input.value, 10);
+  }
+  body.pause_on_critical = el("t_pause_on_critical").checked;
+  const msg = el("tuningMsg");
+  const btn = el("tuningApply");
+  btn.disabled = true;
+  try {
+    const r = await fetch("/api/tuning", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+    msg.textContent = "applied ✓";
+    msg.className = "tuning-msg ok";
+  } catch (err) {
+    msg.textContent = err.message;
+    msg.className = "tuning-msg err";
+  } finally {
+    btn.disabled = false;
+    tuningDirty = false;
+    setTimeout(() => { msg.textContent = ""; msg.className = "tuning-msg"; }, 4000);
+  }
+}
+
+document.getElementById("tuningForm").addEventListener("submit", submitTuning);
 
 function renderImpact(s) {
   const b = s.baseline;
@@ -337,6 +433,7 @@ async function poll() {
     renderImpact(s);
     renderCharts(s);
     renderEvents(s.events);
+    renderTuning(s.tuning);
   } catch (err) {
     setConn("down", "disconnected");
   }
