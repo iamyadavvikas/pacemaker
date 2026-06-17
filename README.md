@@ -25,6 +25,9 @@ taken production down with a backfill.
 
 ## Architecture
 
+> See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full set of rendered Mermaid
+> diagrams (control loop, signal flow, attribution, deployment modes, before/after).
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              Production Database                            │
