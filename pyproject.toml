@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pacing-governor"
+version = "0.0.1"
+description = "Runtime governor that throttles database migration/backfill jobs against live DB headroom."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "psycopg[binary]>=3.1",
+]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.7"]
+dev = ["pytest>=8.0", "matplotlib>=3.7"]
+
+[project.scripts]
+governor-live = "harness.live:main"
+dbguard = "harness.observe:cli"
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["governor*", "harness*"]
+
+[tool.setuptools.package-data]
+governor = ["web/*.html"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]

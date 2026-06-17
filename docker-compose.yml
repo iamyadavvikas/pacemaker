@@ -1,0 +1,50 @@
+# Postgres tuned small + CPU-limited so a heavy backfill creates real, visible
+# contention on a laptop. This makes the "backfill tanks checkout p99" demo
+# reproducible. Synthetic data only — no real-world data ever goes here.
+services:
+  db:
+    image: postgres:16
+    container_name: gov-demo-db
+    environment:
+      POSTGRES_USER: gov
+      POSTGRES_PASSWORD: govpass
+      POSTGRES_DB: govdemo
+    command:
+      - postgres
+      - -c
+      - max_connections=50
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - fsync=on
+      - -c
+      - synchronous_commit=on
+    ports:
+      - "5544:5432"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gov -d govdemo"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Live dashboard + looping governed backfill. Reaches the DB over the compose
+  # network at db:5432 (not the host-mapped 5544). Binds 0.0.0.0 inside the
+  # container; the dashboard is unauthenticated, so keep this network private.
+  dashboard:
+    build: .
+    container_name: gov-dashboard
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GOV_DASH_HOST: "0.0.0.0"
+      GOV_DASH_PORT: "8765"
+      GOV_DEMO_DSN: "postgresql://gov:govpass@db:5432/govdemo"
+      GOV_MODE: "enforce"
+    ports:
+      - "8765:8765"

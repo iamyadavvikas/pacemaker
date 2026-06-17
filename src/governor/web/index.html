@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>pacing-governor — live</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e;
+    --green: #2ea043; --yellow: #d29922; --red: #da3633; --critical: #a371f7;
+    --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 16px 24px; border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  .mode-pill {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .8px;
+    padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted);
+  }
+  .mode-pill.enforce { color: var(--green); border-color: var(--green); }
+  .mode-pill.observe { color: var(--yellow); border-color: var(--yellow); }
+  .mode-btn {
+    font: inherit; font-size: 12px; cursor: pointer;
+    padding: 4px 12px; border-radius: 6px; border: 1px solid var(--border);
+    background: #21262d; color: var(--text); transition: border-color .2s, opacity .2s;
+  }
+  .mode-btn:hover:not(:disabled) { border-color: var(--accent); }
+  .mode-btn:disabled { opacity: .5; cursor: default; }
+  .conn { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .conn .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; vertical-align: middle; }
+  .conn.live .dot { background: var(--green); }
+  .conn.down .dot { background: var(--red); }
+
+  main { padding: 24px; display: grid; gap: 20px; max-width: 1180px; margin: 0 auto; }
+  .top { display: grid; grid-template-columns: 220px 1fr; gap: 20px; }
+  @media (max-width: 760px) { .top { grid-template-columns: 1fr; } }
+
+  .light-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  }
+  .light {
+    width: 96px; height: 96px; border-radius: 50%;
+    background: var(--muted); box-shadow: 0 0 0 0 transparent; transition: background .25s, box-shadow .25s;
+  }
+  .light.GREEN { background: var(--green); box-shadow: 0 0 32px 4px rgba(46,160,67,.5); }
+  .light.YELLOW { background: var(--yellow); box-shadow: 0 0 32px 4px rgba(210,153,34,.5); }
+  .light.RED { background: var(--red); box-shadow: 0 0 32px 4px rgba(218,54,51,.55); }
+  .light.CRITICAL { background: var(--critical); box-shadow: 0 0 36px 6px rgba(163,113,247,.6); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
+  .light-label { font-size: 18px; font-weight: 700; letter-spacing: 1px; }
+
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  @media (max-width: 760px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+  .tile {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+  }
+  .tile .k { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
+  .tile .v { font-size: 30px; font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .tile .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .tile.warn .v { color: var(--red); }
+
+  .impact {
+    background: linear-gradient(180deg, rgba(46,160,67,.10), var(--panel));
+    border: 1px solid var(--green); border-radius: 12px; padding: 18px 22px;
+    display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 4px 22px;
+  }
+  .impact .impact-head { grid-column: 1; font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--green); font-weight: 700; }
+  .impact .impact-num { grid-column: 1; grid-row: 2; font-size: 46px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+  .impact .impact-num .unit { font-size: 14px; font-weight: 600; color: var(--muted); margin-left: 8px; }
+  .impact .impact-side { grid-column: 2; grid-row: 1 / span 2; font-size: 13px; color: var(--muted); }
+  .impact .impact-side b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .impact .impact-side .ung { color: var(--red); }
+
+  .chart-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px 18px;
+  }
+  .chart-card h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 10px; text-transform: uppercase; letter-spacing: .6px; }
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 760px) { .charts { grid-template-columns: 1fr; } }
+  canvas { width: 100% !important; height: 240px !important; }
+
+  .events { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+  .events h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 10px; text-transform: uppercase; letter-spacing: .6px; }
+  .log { max-height: 220px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .log .row { display: flex; gap: 10px; padding: 4px 0; border-bottom: 1px solid rgba(48,54,61,.5); }
+  .log .t { color: var(--muted); width: 56px; flex: none; text-align: right; }
+  .log .kind { width: 130px; flex: none; font-weight: 600; }
+  .log .kind.backoff { color: var(--yellow); }
+  .log .kind.circuit_break { color: var(--red); }
+  .log .kind.sensor_error { color: var(--red); }
+  .log .kind.would_throttle { color: var(--accent); }
+  .log .kind.cancel { color: var(--red); }
+  .log .kind.enforcer_tripped { color: var(--yellow); }
+  .log .detail { color: var(--text); }
+  .log .empty { color: var(--muted); padding: 8px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>pacing-governor</h1>
+  <span id="mode" class="mode-pill">—</span>
+  <button id="modeBtn" class="mode-btn" disabled>—</button>
+  <span id="conn" class="conn"><span class="dot"></span><span id="connText">connecting…</span></span>
+</header>
+
+<main>
+  <section id="impact" class="impact" hidden>
+    <div class="impact-head">Outage avoided this run</div>
+    <div class="impact-num"><span id="impactPrevented">—</span><span class="unit">lock-jam samples prevented</span></div>
+    <div class="impact-side">
+      lock-waiting samples: ungoverned <b class="ung" id="baseBlocked">—</b> → governed <b id="liveBlocked">—</b><br />
+      ungoverned checkout p99 <b class="ung" id="baseP99">—</b>ms · governor backed off <b id="impBackoff">0</b>× · circuit-broke <b id="impCb">0</b>×
+    </div>
+  </section>
+
+  <div class="top">
+    <div class="light-card">
+      <div id="light" class="light"></div>
+      <div id="lightLabel" class="light-label">—</div>
+    </div>
+    <div class="tiles">
+      <div class="tile"><div class="k">Allowed concurrency</div><div id="limit" class="v">—</div><div id="limitSub" class="sub">AIMD limit</div></div>
+      <div class="tile"><div class="k">In flight</div><div id="inflight" class="v">—</div><div class="sub">batches running</div></div>
+      <div class="tile"><div class="k">Active backends</div><div id="active" class="v">—</div><div class="sub">DB sessions</div></div>
+      <div class="tile" id="blockedTile"><div class="k">Blocked backends</div><div id="blocked" class="v">—</div><div class="sub">lock-waiting</div></div>
+    </div>
+  </div>
+
+  <div class="charts">
+    <div class="chart-card">
+      <h2>DB backends &amp; allowed limit</h2>
+      <canvas id="loadChart"></canvas>
+    </div>
+    <div class="chart-card">
+      <h2>Checkout latency (ms)</h2>
+      <canvas id="latChart"></canvas>
+    </div>
+  </div>
+
+  <div class="events">
+    <h2>Governor decisions</h2>
+    <div id="log" class="log"><div class="empty">No events yet…</div></div>
+  </div>
+</main>
+
+<script>
+const LEVELS = { GREEN: 0, YELLOW: 1, RED: 2, CRITICAL: 3 };
+const COLORS = {
+  active: "#da3633", blocked: "#a371f7", limit: "#58a6ff", latency: "#2ea043",
+  ghost: "#da3633",
+};
+const POLL_MS = 250;
+
+function mkChart(ctx, datasets, yTitle) {
+  return new Chart(ctx, {
+    type: "line",
+    data: { datasets },
+    options: {
+      animation: false, responsive: true, maintainAspectRatio: false,
+      parsing: false, normalized: true,
+      interaction: { intersect: false, mode: "nearest" },
+      scales: {
+        x: { type: "linear", title: { display: true, text: "seconds", color: "#8b949e" },
+             ticks: { color: "#8b949e", maxTicksLimit: 6 }, grid: { color: "rgba(48,54,61,.4)" } },
+        y: { beginAtZero: true, title: { display: true, text: yTitle, color: "#8b949e" },
+             ticks: { color: "#8b949e" }, grid: { color: "rgba(48,54,61,.4)" } },
+      },
+      plugins: { legend: { labels: {
+        color: "#e6edf3", boxWidth: 12, font: { size: 11 },
+        filter: (item) => !String(item.text).startsWith("_"),
+      } } },
+    },
+  });
+}
+
+const loadChart = mkChart(document.getElementById("loadChart"), [
+  { label: "active", data: [], borderColor: COLORS.active, backgroundColor: COLORS.active, borderWidth: 2, pointRadius: 0, tension: .25 },
+  { label: "blocked", data: [], borderColor: COLORS.blocked, backgroundColor: COLORS.blocked, borderWidth: 2, pointRadius: 0, tension: .25 },
+  { label: "limit", data: [], borderColor: COLORS.limit, backgroundColor: COLORS.limit, borderWidth: 2, pointRadius: 0, stepped: true },
+], "backends / limit");
+
+const latChart = mkChart(document.getElementById("latChart"), [
+  // ghost baseline (drawn behind): a shaded p50→max band + a dashed p99 line.
+  { label: "_ghost_lo", data: [], borderColor: "transparent", backgroundColor: "rgba(218,54,51,.08)", borderWidth: 0, pointRadius: 0 },
+  { label: "ungoverned band", data: [], borderColor: "transparent", backgroundColor: "rgba(218,54,51,.08)", borderWidth: 0, pointRadius: 0, fill: "-1" },
+  { label: "ungoverned p99", data: [], borderColor: COLORS.ghost, borderDash: [6, 4], borderWidth: 1.5, pointRadius: 0 },
+  { label: "checkout p95 (live)", data: [], borderColor: COLORS.latency, backgroundColor: COLORS.latency, borderWidth: 2, pointRadius: 0, tension: .25 },
+], "ms");
+
+const el = (id) => document.getElementById(id);
+
+function setConn(state, text) {
+  const c = el("conn");
+  c.className = "conn " + state;
+  el("connText").textContent = text;
+}
+
+function renderLight(level) {
+  const light = el("light");
+  light.className = "light " + (level || "");
+  el("lightLabel").textContent = level || "—";
+}
+
+function renderTiles(s) {
+  el("limit").textContent = s.limit ?? "—";
+  el("limitSub").textContent = `AIMD limit · max ${s.max_limit ?? "?"}`;
+  el("inflight").textContent = s.in_flight ?? "—";
+  const last = s.samples && s.samples.length ? s.samples[s.samples.length - 1] : null;
+  const active = last ? last.active_backends : null;
+  const blocked = last ? last.blocked_backends : null;
+  el("active").textContent = active == null || active < 0 ? "—" : active;
+  el("blocked").textContent = blocked == null || blocked < 0 ? "—" : blocked;
+  el("blockedTile").className = "tile" + (blocked > 0 ? " warn" : "");
+}
+
+function renderMode(mode) {
+  const m = el("mode");
+  m.textContent = mode || "—";
+  m.className = "mode-pill " + (mode || "");
+  currentMode = mode || null;
+  const btn = el("modeBtn");
+  if (currentMode) {
+    const next = currentMode === "enforce" ? "observe" : "enforce";
+    btn.textContent = "Switch to " + next.toUpperCase();
+    btn.disabled = false;
+  } else {
+    btn.textContent = "—";
+    btn.disabled = true;
+  }
+}
+
+let currentMode = null;
+
+async function toggleMode() {
+  if (!currentMode) return;
+  const next = currentMode === "enforce" ? "observe" : "enforce";
+  const btn = el("modeBtn");
+  btn.disabled = true;
+  try {
+    await fetch("/api/mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: next }),
+    });
+    await poll();
+  } catch (err) {
+    btn.disabled = false;  // next poll re-syncs the button state
+  }
+}
+
+document.getElementById("modeBtn").addEventListener("click", toggleMode);
+
+function renderImpact(s) {
+  const b = s.baseline;
+  const sec = el("impact");
+  if (!b) { sec.hidden = true; return; }
+  sec.hidden = false;
+  const baseBlocked = b.blocked_samples ?? 0;
+  const liveBlocked = s.blocked_sample_count ?? 0;
+  const prevented = Math.max(baseBlocked - liveBlocked, 0);
+  el("impactPrevented").textContent = prevented;
+  el("baseBlocked").textContent = baseBlocked;
+  el("liveBlocked").textContent = liveBlocked;
+  el("baseP99").textContent = b.p99_ms ?? "—";
+  el("impBackoff").textContent = s.backoff_events ?? 0;
+  el("impCb").textContent = s.circuit_break_events ?? 0;
+}
+
+function renderCharts(s) {
+  const samples = s.samples || [];
+  const active = [], blocked = [], limit = [];
+  for (const p of samples) {
+    const t = +p.t.toFixed(2);
+    if (p.active_backends >= 0) active.push({ x: t, y: p.active_backends });
+    if (p.blocked_backends >= 0) blocked.push({ x: t, y: p.blocked_backends });
+    limit.push({ x: t, y: p.limit });
+  }
+  loadChart.data.datasets[0].data = active;
+  loadChart.data.datasets[1].data = blocked;
+  loadChart.data.datasets[2].data = limit;
+  loadChart.update();
+
+  const lat = (s.extra && Array.isArray(s.extra.latency_series)) ? s.extra.latency_series : null;
+  if (lat) {
+    const live = lat.map((d) => ({ x: +(+d[0]).toFixed(2), y: +(+d[1]).toFixed(1) }));
+    latChart.data.datasets[3].data = live;
+    // ghost baseline: horizontal band/line spanning the live x-domain.
+    const b = s.baseline;
+    if (b && live.length) {
+      const x0 = live[0].x, x1 = live[live.length - 1].x;
+      const lo = b.p50_ms ?? 0, hi = b.max_ms ?? b.p99_ms ?? 0, p99 = b.p99_ms ?? 0;
+      latChart.data.datasets[0].data = [{ x: x0, y: lo }, { x: x1, y: lo }];
+      latChart.data.datasets[1].data = [{ x: x0, y: hi }, { x: x1, y: hi }];
+      latChart.data.datasets[2].data = [{ x: x0, y: p99 }, { x: x1, y: p99 }];
+    } else {
+      latChart.data.datasets[0].data = [];
+      latChart.data.datasets[1].data = [];
+      latChart.data.datasets[2].data = [];
+    }
+    latChart.update();
+  }
+}
+
+function renderEvents(events) {
+  const log = el("log");
+  if (!events || !events.length) {
+    log.innerHTML = '<div class="empty">No events yet…</div>';
+    return;
+  }
+  const rows = events.slice().reverse().map((e) => {
+    const t = e.t != null ? e.t.toFixed(1) + "s" : "";
+    const detail = (e.detail || "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+    return `<div class="row"><span class="t">${t}</span><span class="kind ${e.kind}">${e.kind}</span><span class="detail">${detail}</span></div>`;
+  });
+  log.innerHTML = rows.join("");
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/state", { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const s = await r.json();
+    setConn("live", s.running ? "live" : "idle");
+    renderMode(s.mode);
+    renderLight(s.last_level);
+    renderTiles(s);
+    renderImpact(s);
+    renderCharts(s);
+    renderEvents(s.events);
+  } catch (err) {
+    setConn("down", "disconnected");
+  }
+}
+
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>
