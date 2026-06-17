@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>pacing-governor — multi-target</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e;
+    --green: #2ea043; --yellow: #d29922; --red: #da3633; --critical: #a371f7;
+    --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 16px 24px; border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  .conn { margin-left: auto; font-size: 12px; color: var(--muted); }
+
+  main { padding: 24px; max-width: 1400px; margin: 0 auto; }
+
+  .setup { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 24px; }
+  .setup h2 { font-size: 14px; margin: 0 0 12px; color: var(--text); }
+  .setup p { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+  .setup input { width: 100%; background: #0d1117; border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 10px 12px; font: inherit; }
+  .setup input:focus { outline: none; border-color: var(--accent); }
+  .setup button { margin-top: 12px; font: inherit; font-size: 13px; cursor: pointer; padding: 8px 18px; border-radius: 6px; border: none; background: var(--accent); color: #fff; }
+  .setup button:hover { opacity: .9; }
+
+  .targets { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; }
+
+  .target-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .target-card.down { border-color: var(--red); opacity: .7; }
+  .target-header { display: flex; align-items: center; gap: 12px; }
+  .target-name { font-weight: 600; font-size: 14px; flex: 1; word-break: break-all; }
+  .target-name a { color: var(--text); text-decoration: none; }
+  .target-name a:hover { color: var(--accent); text-decoration: underline; }
+  .target-open { font-size: 11px; padding: 4px 10px; border-radius: 4px; background: #21262d; color: var(--accent); text-decoration: none; border: 1px solid var(--border); }
+  .target-open:hover { border-color: var(--accent); background: rgba(88,166,255,.1); }
+  .target-engine { font-size: 11px; padding: 2px 8px; border-radius: 4px; background: #21262d; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .target-engine.postgresql { color: #336791; border: 1px solid #336791; }
+  .target-engine.mongodb { color: #4db33d; border: 1px solid #4db33d; }
+  .target-status { font-size: 11px; color: var(--muted); }
+  .target-status.live { color: var(--green); }
+  .target-status.down { color: var(--red); }
+
+  .target-body { display: flex; gap: 16px; align-items: flex-start; }
+  .light-mini {
+    width: 64px; height: 64px; border-radius: 50%; flex-shrink: 0;
+    background: var(--muted); transition: background .25s, box-shadow .25s;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.4);
+  }
+  .light-mini.GREEN { background: var(--green); box-shadow: 0 0 20px 2px rgba(46,160,67,.4); }
+  .light-mini.YELLOW { background: var(--yellow); box-shadow: 0 0 20px 2px rgba(210,153,34,.4); }
+  .light-mini.RED { background: var(--red); box-shadow: 0 0 20px 2px rgba(218,54,51,.45); }
+  .light-mini.CRITICAL { background: var(--critical); box-shadow: 0 0 24px 4px rgba(163,113,247,.5); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
+
+  .metrics { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
+  .metric { }
+  .metric .k { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+  .metric .v { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .metric .v.warn { color: var(--red); }
+
+  .throttle-row { display: flex; align-items: center; gap: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
+  .throttle-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .throttle-badge { font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 4px; }
+  .throttle-badge.ok { background: rgba(46,160,67,.15); color: var(--green); }
+  .throttle-badge.throttle { background: rgba(218,54,51,.15); color: var(--red); }
+  .throttle-url { font-size: 11px; color: var(--muted); margin-left: auto; font-family: ui-monospace, monospace; }
+
+  footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 32px; padding-bottom: 24px; }
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>pacing-governor</h1>
+  <span class="sub">multi-target view</span>
+  <span class="conn" id="conn">polling...</span>
+</header>
+
+<main>
+  <section class="setup" id="setup">
+    <h2>Add observe targets</h2>
+    <p>Enter the URLs of running <code>dbguard observe</code> instances, comma-separated.<br/>
+       Example: <code>http://localhost:8765, http://localhost:8766</code></p>
+    <input type="text" id="targetsInput" placeholder="http://localhost:8765, http://localhost:8766" />
+    <button id="startBtn">Start monitoring</button>
+  </section>
+
+  <div class="targets" id="targets"></div>
+</main>
+
+<footer>
+  pacing-governor · multi-target view polls each /api/state independently · click "Open Dashboard" on any card for the full single-target view
+</footer>
+
+<script>
+const POLL_MS = 500;
+let targets = [];
+let polling = false;
+
+function parseTargets(str) {
+  return str.split(",").map(s => s.trim()).filter(Boolean).map(url => {
+    if (!url.startsWith("http://") && !url.startsWith("https://")) url = "http://" + url;
+    return url.replace(/\/+$/, "");
+  });
+}
+
+function inferEngine(state) {
+  // MongoDB has replication_lag_s = null on standalone, conn_pool_frac is tiny
+  // PostgreSQL typically has replication_lag_s as a number
+  if (state.replication_lag_s === null && state.conn_pool_frac != null && state.conn_pool_frac < 0.05) {
+    return "mongodb";
+  }
+  return "postgresql";
+}
+
+function createCard(url, idx) {
+  const card = document.createElement("div");
+  card.className = "target-card";
+  card.id = "card-" + idx;
+  card.innerHTML = `
+    <div class="target-header">
+      <span class="target-name"><a href="${url}" target="_blank">${url}</a></span>
+      <a class="target-open" href="${url}" target="_blank">Open Dashboard ↗</a>
+      <span class="target-engine" id="engine-${idx}">—</span>
+      <span class="target-status" id="status-${idx}">connecting</span>
+    </div>
+    <div class="target-body">
+      <div class="light-mini" id="light-${idx}">—</div>
+      <div class="metrics">
+        <div class="metric"><div class="k">Active</div><div class="v" id="active-${idx}">—</div></div>
+        <div class="metric"><div class="k">Blocked</div><div class="v" id="blocked-${idx}">—</div></div>
+        <div class="metric"><div class="k">Limit</div><div class="v" id="limit-${idx}">—</div></div>
+        <div class="metric"><div class="k">Latency</div><div class="v" id="latency-${idx}">—</div></div>
+        <div class="metric"><div class="k">Repl lag</div><div class="v" id="replag-${idx}">—</div></div>
+        <div class="metric"><div class="k">Conn pool</div><div class="v" id="connpool-${idx}">—</div></div>
+      </div>
+    </div>
+    <div class="throttle-row">
+      <span class="throttle-label">Throttle signal:</span>
+      <span class="throttle-badge" id="throttle-${idx}">—</span>
+      <span class="throttle-url">${url}/throttle</span>
+    </div>
+  `;
+  return card;
+}
+
+function updateCard(idx, state, ok) {
+  const card = document.getElementById("card-" + idx);
+  const statusEl = document.getElementById("status-" + idx);
+  const lightEl = document.getElementById("light-" + idx);
+  const engineEl = document.getElementById("engine-" + idx);
+  const throttleEl = document.getElementById("throttle-" + idx);
+
+  if (!ok || !state) {
+    card.className = "target-card down";
+    statusEl.textContent = "offline";
+    statusEl.className = "target-status down";
+    lightEl.className = "light-mini";
+    lightEl.textContent = "—";
+    throttleEl.className = "throttle-badge";
+    throttleEl.textContent = "—";
+    return;
+  }
+
+  card.className = "target-card";
+  statusEl.textContent = "live";
+  statusEl.className = "target-status live";
+
+  const level = state.last_level || "—";
+  lightEl.className = "light-mini " + level;
+  lightEl.textContent = level;
+
+  const engine = inferEngine(state);
+  engineEl.textContent = engine;
+  engineEl.className = "target-engine " + engine;
+
+  // metrics
+  const last = state.samples && state.samples.length ? state.samples[state.samples.length - 1] : null;
+  const active = last ? last.active_backends : (state.migration_active ?? "—");
+  const blocked = last ? last.blocked_backends : (state.migration_blocked ?? "—");
+
+  document.getElementById("active-" + idx).textContent = active;
+  const blockedEl = document.getElementById("blocked-" + idx);
+  blockedEl.textContent = blocked;
+  blockedEl.className = "v" + (blocked > 0 ? " warn" : "");
+
+  document.getElementById("limit-" + idx).textContent = state.limit ?? "—";
+  document.getElementById("latency-" + idx).textContent = state.query_latency_ms != null ? state.query_latency_ms + "ms" : "—";
+  document.getElementById("replag-" + idx).textContent = state.replication_lag_s != null ? (+state.replication_lag_s).toFixed(2) + "s" : "n/a";
+  document.getElementById("connpool-" + idx).textContent = state.conn_pool_frac != null ? (state.conn_pool_frac * 100).toFixed(0) + "%" : "—";
+
+  // throttle
+  const wouldThrottle = state.would_throttle_now || level === "RED" || level === "CRITICAL";
+  throttleEl.textContent = wouldThrottle ? "503 (pause)" : "200 (proceed)";
+  throttleEl.className = "throttle-badge " + (wouldThrottle ? "throttle" : "ok");
+}
+
+async function pollTarget(url, idx) {
+  try {
+    const r = await fetch(url + "/api/state", { signal: AbortSignal.timeout(2000) });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const state = await r.json();
+    updateCard(idx, state, true);
+  } catch (err) {
+    updateCard(idx, null, false);
+  }
+}
+
+async function pollAll() {
+  if (!polling) return;
+  await Promise.all(targets.map((url, idx) => pollTarget(url, idx)));
+  document.getElementById("conn").textContent = `polling ${targets.length} target(s)`;
+  setTimeout(pollAll, POLL_MS);
+}
+
+function start() {
+  const input = document.getElementById("targetsInput").value;
+  targets = parseTargets(input);
+  if (targets.length === 0) {
+    alert("Enter at least one target URL");
+    return;
+  }
+
+  // Update URL with targets
+  const params = new URLSearchParams();
+  params.set("targets", targets.join(","));
+  history.replaceState(null, "", "?" + params.toString());
+
+  // Hide setup, show cards
+  document.getElementById("setup").hidden = true;
+  const container = document.getElementById("targets");
+  container.innerHTML = "";
+  targets.forEach((url, idx) => container.appendChild(createCard(url, idx)));
+
+  polling = true;
+  pollAll();
+}
+
+document.getElementById("startBtn").addEventListener("click", start);
+document.getElementById("targetsInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") start();
+});
+
+// Auto-start from URL params
+window.addEventListener("DOMContentLoaded", () => {
+  const params = new URLSearchParams(location.search);
+  const t = params.get("targets");
+  if (t) {
+    document.getElementById("targetsInput").value = t;
+    start();
+  }
+});
+</script>
+</body>
+</html>

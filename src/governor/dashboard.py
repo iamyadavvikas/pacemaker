@@ -52,6 +52,11 @@ def _load_index_html() -> str:
     return resources.files(__package__).joinpath("web/index.html").read_text(encoding="utf-8")
 
 
+def _load_multi_html() -> str:
+    """Read the multi-target dashboard page."""
+    return resources.files(__package__).joinpath("web/multi.html").read_text(encoding="utf-8")
+
+
 class DashboardServer:
     """Serves a live view of one ``Governor`` over HTTP on a daemon thread."""
 
@@ -73,6 +78,7 @@ class DashboardServer:
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._index_html = _load_index_html()
+        self._multi_html = _load_multi_html()
 
     # --- auth ---
     def _auth_ok(self, header: str | None) -> bool:
@@ -210,6 +216,8 @@ def _make_handler(server: DashboardServer):
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            # CORS: allow multi-target dashboard to poll from any origin
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(body)
 
@@ -234,6 +242,9 @@ def _make_handler(server: DashboardServer):
                 return
             if path in ("/", "/index.html"):
                 self._send(200, server._index_html.encode("utf-8"), "text/html; charset=utf-8")
+                return
+            if path in ("/multi", "/multi.html"):
+                self._send(200, server._multi_html.encode("utf-8"), "text/html; charset=utf-8")
                 return
             if path == "/api/state":
                 body = json.dumps(server._state()).encode("utf-8")
